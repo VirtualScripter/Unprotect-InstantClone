@@ -1,33 +1,33 @@
 ﻿<#
 .NOTES
-    Author: Mark McGill, VMware
-    Last Edit: 10-7-2020
-    Version 1.0
+Author: Mark McGill, VMware
+Last Edit: 10-7-2020
+Version 1.0
 .SYNOPSIS
-    Unprotect Instant Clone VMs in order to delete those that are abandoned by Horizon
+Unprotect Instant Clone VMs in order to delete those that are abandoned by Horizon
 .DESCRIPTION
-    Uses vCenter API to enable methods needed to unprotect Instant Clone VMs
-    Enabled methods match those enabled by the Horizon icCleanup tool to unprotect Instant Clones
+Uses vCenter API to enable methods needed to unprotect Instant Clone VMs
+Enabled methods match those enabled by the Horizon icCleanup tool to unprotect Instant Clones
 .EXAMPLE
-    #load function in order to call
-    . .\Unprotect-InstantClone.ps1
+#load function in order to call
+. .\Unprotect-InstantClone.ps1
 .EXAMPLE
-    #Required parameters are vm and vCenter
-    Unprotect-InstantClone -vm <vmName> -vCenter <vcenterFQDN>
+#Required parameters are vm and vCenter
+Unprotect-InstantClone -vm <vmName> -vCenter <vcenterFQDN>
 .EXAMPLE
-    #Accepts pipeline input in the form of an array of VM Names, or VM Objects from Get-VM
-    $vms = Get-VM ic-Template*
-    $vms | Unprotect-InstantClone -vCenter <vcenterFQDN> -user administrator@vsphere.local
+#Accepts pipeline input in the form of an array of VM Names, or VM Objects from Get-VM
+$vms = Get-VM ic-Template*
+$vms | Unprotect-InstantClone -vCenter <vcenterFQDN> -user administrator@vsphere.local
 .EXAMPLE
-    #Username and password can be passed as parameters as well as a Credential object.  You will be prompted if none are provided
-    $credentials = Get-Credential
-    Unprotect-InstantClone -vm <vmName> -vCenter vCenter.corp.local -Credentials $credentials
+#Username and password can be passed as parameters as well as a Credential object.  You will be prompted if none are provided
+$credentials = Get-Credential
+Unprotect-InstantClone -vm <vmName> -vCenter vCenter.corp.local -Credentials $credentials
 .EXAMPLE
-    #You will be prompted to confirm unprotecting VMs unless you pass the '-Confirm $false' parameter
-    Unprotect-InstantClone -vm <vmName> -vCenter <vcenterFQDN> -user administrator@vsphere.local -Confirm $false
+#You will be prompted to confirm unprotecting VMs unless you pass the '-Confirm $false' parameter
+Unprotect-InstantClone -vm <vmName> -vCenter <vcenterFQDN> -user administrator@vsphere.local -Confirm $false
 .EXAMPLE
-    #Use the '-Verbose' option to show additional output during processing
-    Unprotect-InstantClone -VM <vmName> -vCenter <vcenterFQDN>  -Verbose
+#Use the '-Verbose' option to show additional output during processing
+Unprotect-InstantClone -VM <vmName> -vCenter <vcenterFQDN>  -Verbose
 #>
 
 Function Unprotect-InstantClone {
@@ -40,17 +40,31 @@ Function Unprotect-InstantClone {
         [Parameter(Mandatory=$False)][String]$user,
         [Parameter(Mandatory=$False)][String]$password,
         [Parameter(Mandatory=$False)]$credentials,
-        [Parameter(Mandatory=$False)][ValidateSet($true,$false)][bool]$Confirm = $true
+        [Parameter(Mandatory=$False)][ValidateSet($true,$false)][bool]$Confirm = $false
     )
 
     Begin
     {
         #Variables
         #methods that are re-enabled using the Horizon iccleanup tool to unprotect a VM
-        $methods = "Reload","Rename_Task","CreateSnapshot_Task","MigrateVM_Task","PowerOffVM_Task","PromoteDisks_Task","ReconfigVM_Task","reloadVirtualMachineFromPath_Task","RelocateVM_Task","RemoveAllSnapshots_Task","ResetVM_Task","RevertToCurrentSnapshot_Task","SuspendVM_Task","TerminateVM"
+        $parentMethods = "CreateSnapshot_Task","MigrateVM_Task","PowerOffVM_Task","PromoteDisks_Task","ReconfigVM_Task","Reload","reloadVirtualMachineFromPath_Task","RelocateVM_Task","RemoveAllSnapshots_Task","Rename_Task","ResetVM_Task","RevertToCurrentSnapshot_Task","SuspendVM_Task","TerminateVM"
+        $replica_templateMethods = "CreateSnapshot_Task","CustomizeVM_Task","Destroy_Task","MarkAsTemplate","PowerOnVM_Task","ReconfigVM_Task","Reload","reloadVirtualMachineFromPath_Task","RelocateVM_Task","RemoveAllSnapshots_Task","Rename_Task","RevertToCurrentSnapshot_Task","UnregisterVM"
+        #encodes methods to use in the API call
+        $pMethodsEnc = @()
+        foreach ($method in $parentMethods)
+        {
+            $pMethodsEnc += "%3Cmethod%3E$method%3C%2Fmethod%3E"
+        }
+        $rtMethodsEnc = @()
+        foreach ($method in $replica_templateMethods)
+        {
+            $rtMethodsEnc += "%3Cmethod%3E$method%3C%2Fmethod%3E"
+        }
+
         # vSphere MOB URL to private enableMethods
         $mobUrl = "https://$vCenter/mob/?moid=AuthorizationManager&method=enableMethods"
         $mobLogoutUrl = "https://$vCenter/mob/logout"
+        $continue = $true
 
         Try
         {
@@ -151,34 +165,45 @@ Function Unprotect-InstantClone {
         #load function for use in posting enable methods from process block
         Function Enable-Method($icName,$icMoRef,$nonce)
         {
+            If ($icName -match "cp-parent-")
+            {
+                $methods = $pMethodsEnc
+            }
+            ElseIf ($icName -match "cp-template-" -or $icName -match "cp-replica-")
+            {
+                $methods = $rtMethodsEnc
+            }
+            Else
+            {
+                Throw "Virtual Machine is not an instant clone!"
+            }
+            
             Write-Verbose "Unprotecting $icName"
             Try
             {
-                foreach ($method in $methods)
-                {
-                    #the POST data payload must include the vmware-session-nonce variable + URL-encoded
-                    $encodedBody = @"
-vmware-session-nonce=$nonce&entity=%3Centity+type%3D%22ManagedEntity%22+xsi%3Atype%3D%22ManagedObjectReference%22%3E$icMoRef%3C%2Fentity%3E%0D%0A&method=%3Cmethod%3E$method%3C%2Fmethod%3E
+                #the POST data payload must include the vmware-session-nonce variable + URL-encoded
+                $encodedBody = @"
+vmware-session-nonce=$nonce&entity=%3Centity+type%3D%22ManagedEntity%22+xsi%3Atype%3D%22ManagedObjectReference%22%3E$icMoRef%3C%2Fentity%3E%0D%0A&method=$methods
 "@
-                    # Second request using a POST and specifying our session from initial login + body request
-                    Write-Verbose "Enabling Method: $method"
-                    If ($PSVersionTable.PSVersion.Major -eq 5)
-                    {
-                        $postResults = Invoke-WebRequest -Uri $mobUrl -WebSession $vmware -Method POST -Body $encodedBody -ErrorAction Stop
-                    }
-                    Elseif ($PSVersionTable.PSVersion.Major -ge 6)
-                    {
-                        $postResults = Invoke-WebRequest -Uri $mobUrl -WebSession $vmware -Method POST -Body $encodedBody -SkipCertificateCheck -ErrorAction Stop
-                    }
+                # Second request using a POST and specifying our session from initial login + body request
+                Write-Verbose "Enabling Methods on $icName"
+                If ($PSVersionTable.PSVersion.Major -eq 5)
+                {
+                    $postResults = Invoke-WebRequest -Uri $mobUrl -WebSession $vmware -Method POST -Body $encodedBody -ErrorAction Stop
                 }
-                Return $postResults
-                break
-                Write-Verbose "Encoded URI: $encodedBody"
+                Elseif ($PSVersionTable.PSVersion.Major -ge 6)
+                {
+                    $postResults = Invoke-WebRequest -Uri $mobUrl -WebSession $vmware -Method POST -Body $encodedBody -SkipCertificateCheck -ErrorAction Stop
+                }
 
             }#end try
             Catch
             {
                 Throw "Error calling MOB API on $vCenter : $($_.Exception.Message)"
+            }
+            If ($postResults.StatusCode -ne 200)
+            {
+                Write-Warning "Error enabling methods for $icName"
             }
             Write-Debug "Post results: $postResults"
             Write-Output "Unprotected $icName"
@@ -187,12 +212,12 @@ vmware-session-nonce=$nonce&entity=%3Centity+type%3D%22ManagedEntity%22+xsi%3Aty
 
     Process
     {
-        foreach ($vmObj in $VM)
+        foreach ($vmObj in $vm)
         {
             #gets VM MoRef value
             If ($vmObj.MoRef.Value -eq $null)
             {
-                If (($global:DefaultVIServer).Name -ne $vCenter)
+                If (($global:DefaultVIServer).Name -ne $vCenter -or $global:DefaultVIServer.IsConnected -ne $true)
                 {
                     Write-Verbose "Not currently connected to $vCenter.  Attempting to connect"
                     Try
@@ -203,12 +228,12 @@ vmware-session-nonce=$nonce&entity=%3Centity+type%3D%22ManagedEntity%22+xsi%3Aty
                     {
                         Throw "Error connecting to $vCenter : $($_.Exception.Message)"
                     }
-            }#end if
+                }#end if
                 
                 $vmObj = Get-View -ViewType VirtualMachine -Filter @{"Name"="^$($vm)$"} -Property Name -Server $vCenter
                 $vmName = $vmObj.Name
                 $vmMoRef = $vmObj.MoRef.Value
-            }
+            }#end if
             Else
             {
                 $vmName = $vmObj.Name
@@ -217,29 +242,29 @@ vmware-session-nonce=$nonce&entity=%3Centity+type%3D%22ManagedEntity%22+xsi%3Aty
 
             If ($Confirm)
             {
+                Enable-Method $vmName $vmMoRef $sessionnonce
+            }
+            Else
+            {
                 Write-Host "WARNING: Performing Unprotect on $vmName. Please Confirm" -ForegroundColor Yellow
-                Write-Host "    [Y]Yes [A]Yes to All [N]No [L]No to All [C]Cancel:" -NoNewline -ForegroundColor Yellow
+                Write-Host "    [Y]Yes [A]Yes to All [N]No [C]Cancel:" -NoNewline -ForegroundColor Yellow
                 $choice = Read-Host
                 Switch ($choice)
                 {
-                    "Y" {Enable-Method $vmName $vmMoRef $sessionnonce; $Confirm = $True}
-                    "A" {Enable-Method $vmName $vmMoRef $sessionnonce; $Confirm = $False}
-                    "N" {$Confirm = $True}
-                    "L" {break}
-                    "C" {break}
-                    Default {Write-Host "Not a valid option. Exiting"; break}
+                    "Y" {Enable-Method $vmName $vmMoRef $sessionnonce; $Confirm = $False}
+                    "A" {Enable-Method $vmName $vmMoRef $sessionnonce; $Confirm = $True}
+                    "N" {Write-Output "Skipping $icName";$Confirm = $False; break}
+                    "C" {Write-Warning "Cancelling Unprotect!"; Throw "Cancelled"}
+                    Default {Write-Warning "Not a valid option. Exiting"; Throw "Cancelled"}
                 }
             }#end if
-            Else
-            {
-                Enable-Method $vmName $vmMoRef $sessionnonce
-            }
-        }#end foreach
+        }#end vmLoop foreach
     }#end process
 
     End
     {
         #logout of API
+        Write-Verbose "Logging out of vCenter API"
         If ($PSVersionTable.PSVersion.Major -eq 5)
         {
             $logOut = Invoke-WebRequest -Uri $mobLogoutUrl -WebSession $vmware -Method GET -ErrorAction Stop
