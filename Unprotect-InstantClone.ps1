@@ -1,8 +1,8 @@
 ﻿<#
 .NOTES
 Author: Mark McGill, VMware
-Last Edit: 10-7-2020
-Version 1.0
+Last Edit: 11-23-2020
+Version 1.1
 .SYNOPSIS
 Unprotect Instant Clone VMs in order to delete those that are abandoned by Horizon
 .DESCRIPTION
